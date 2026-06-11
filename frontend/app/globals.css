@@ -1,0 +1,98 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0A0E17;
+  --foreground: #C8D8E8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: #0A0E17;
+  color: #C8D8E8;
+  font-family: 'Inter', system-ui, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0A0E17; }
+::-webkit-scrollbar-thumb { background: #1A2332; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #2A3F55; }
+
+/* Grid line background */
+.grid-bg {
+  background-image: 
+    linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* Score bar animation */
+.score-bar {
+  transition: width 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Glow effects */
+.glow-cyan { box-shadow: 0 0 20px rgba(0, 212, 255, 0.15); }
+.glow-green { box-shadow: 0 0 20px rgba(0, 255, 136, 0.15); }
+.glow-amber { box-shadow: 0 0 20px rgba(255, 184, 0, 0.15); }
+.glow-red { box-shadow: 0 0 20px rgba(255, 68, 68, 0.15); }
+
+/* Terminal cursor blink */
+.cursor::after {
+  content: '▋';
+  animation: blink 1s step-end infinite;
+  color: #00D4FF;
+  margin-left: 2px;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* Card hover */
+.impact-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.impact-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 32px rgba(0, 212, 255, 0.08);
+}
+
+/* Rank badge */
+.rank-1 { background: linear-gradient(135deg, #FFD700, #FF8C00); color: #000; }
+.rank-2 { background: linear-gradient(135deg, #C0C0C0, #808080); color: #000; }
+.rank-3 { background: linear-gradient(135deg, #CD7F32, #8B4513); color: #fff; }
+
+/* Rating badges */
+.rating-CRITICAL { background: rgba(255,68,68,0.15); color: #FF4444; border: 1px solid rgba(255,68,68,0.3); }
+.rating-HIGH { background: rgba(255,140,0,0.15); color: #FF8C00; border: 1px solid rgba(255,140,0,0.3); }
+.rating-MODERATE { background: rgba(255,215,0,0.15); color: #FFD700; border: 1px solid rgba(255,215,0,0.3); }
+.rating-LOW { background: rgba(0,255,136,0.15); color: #00FF88; border: 1px solid rgba(0,255,136,0.3); }
+.rating-MINIMAL { background: rgba(158,158,158,0.15); color: #9E9E9E; border: 1px solid rgba(158,158,158,0.3); }
+.rating-ERROR, .rating-FETCH_ERROR { background: rgba(90,90,90,0.15); color: #666; border: 1px solid rgba(90,90,90,0.3); }
+
+/* Scanning line animation */
+@keyframes scanLine {
+  0% { top: -2px; }
+  100% { top: 100%; }
+}
+
+.scan-container { position: relative; overflow: hidden; }
+.scan-container::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(0,212,255,0.4), transparent);
+  animation: scanLine 2s linear infinite;
+  pointer-events: none;
+}
