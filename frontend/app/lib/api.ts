@@ -1,14 +1,11 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-export interface PDFMeta {
-  id: string;
-  url: string;
-  label: string;
-}
+export interface PDFMeta { id: string; url: string; label: string; }
 
 export interface ScoreDimension {
   score: number;
-  reasoning: string;
+  reason?: string;
+  reasoning?: string;
 }
 
 export interface Scores {
@@ -77,6 +74,22 @@ export async function pollJob(jobId: string): Promise<JobResponse> {
   return res.json();
 }
 
+export async function cancelJob(jobId: string): Promise<void> {
+  await fetch(`${API_BASE}/api/job/${jobId}/cancel`, { method: "POST" });
+}
+
+export async function uploadPDF(file: File): Promise<AnalysisResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("label", file.name.replace(".pdf", ""));
+  const res = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: formData });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Upload failed" }));
+    throw new Error(err.detail || "Upload failed");
+  }
+  return res.json();
+}
+
 export async function getDefaultPDFs(): Promise<PDFMeta[]> {
   const res = await fetch(`${API_BASE}/api/default-pdfs`);
   if (!res.ok) throw new Error("Could not fetch default PDFs");
@@ -85,30 +98,34 @@ export async function getDefaultPDFs(): Promise<PDFMeta[]> {
 }
 
 export const DIMENSION_LABELS: Record<string, string> = {
-  financial_magnitude: "Financial Magnitude",
-  sector_sensitivity: "Sector Sensitivity",
-  revenue_contribution: "Revenue Contribution",
+  financial_magnitude:      "Financial Magnitude",
+  sector_sensitivity:       "Sector Sensitivity",
+  revenue_contribution:     "Revenue Contribution",
   announcement_credibility: "Announcement Credibility",
-  market_impact_potential: "Market Impact Potential",
+  market_impact_potential:  "Market Impact Potential",
 };
 
 export const DIMENSION_ICONS: Record<string, string> = {
-  financial_magnitude: "₹",
-  sector_sensitivity: "⚡",
-  revenue_contribution: "📈",
-  announcement_credibility: "🏛",
-  market_impact_potential: "🎯",
+  financial_magnitude:      "₹",
+  sector_sensitivity:       "⚡",
+  revenue_contribution:     "↗",
+  announcement_credibility: "◈",
+  market_impact_potential:  "◎",
 };
+
+export function getDimReason(dim?: ScoreDimension): string {
+  return dim?.reason || dim?.reasoning || "";
+}
 
 export function getRatingColor(rating: string): string {
   const map: Record<string, string> = {
-    CRITICAL: "#FF4444",
-    HIGH: "#FF8C00",
-    MODERATE: "#FFD700",
-    LOW: "#00FF88",
-    MINIMAL: "#9E9E9E",
-    ERROR: "#555555",
-    FETCH_ERROR: "#555555",
+    CRITICAL: "#F59E0B",
+    HIGH:     "#38BDF8",
+    MODERATE: "#10B981",
+    LOW:      "#7A9AB8",
+    MINIMAL:  "#3D5670",
+    ERROR:    "#3D5670",
+    FETCH_ERROR: "#3D5670",
   };
-  return map[rating] || "#9E9E9E";
+  return map[rating] || "#3D5670";
 }

@@ -1,101 +1,74 @@
 import os
 import json
 import re
+import time
 import httpx
-from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "mistralai/mistral-7b-instruct"  # Free on OpenRouter
 
-EXTRACTION_PROMPT = """You are a financial analyst specializing in Indian listed companies and stock exchange filings.
+# Current verified free models on OpenRouter as of June 2026
+# Ordered: best quality first, fallback to smaller/faster
+MODELS = [
+    "google/gemma-4-31b-it:free",   # Best free model (Quality 65), 262K ctx
+]
 
-Analyze the following corporate announcement document text and extract structured information.
+INTER_DOC_DELAY = 12  # seconds between documents (stay under 20 req/min)
 
-Return ONLY a valid JSON object with these exact fields:
-{{
-  "company_name": "string - full company name",
-  "ticker": "string - NSE/BSE ticker if mentioned, else null",
-  "announcement_type": "string - e.g. Order Win, GST Demand, Acquisition, Joint Venture, Regulatory Filing, etc.",
-  "financial_value": "string - monetary value mentioned (e.g. '₹250 Cr', '$10M'), or null if not mentioned",
-  "financial_value_inr_crore": "number - estimated value in INR crore, or null",
-  "sector": "string - industry sector",
-  "counterparty": "string - client/authority/partner name, or null",
-  "time_horizon": "string - Short-term (0-6 months), Medium-term (6-18 months), Long-term (18+ months), or Unknown",
-  "summary": "string - 2-3 sentence plain English summary of the announcement",
-  "key_facts": ["list", "of", "3-5", "key", "facts"]
-}}
+COMBINED_PROMPT = """You are a financial analyst scoring Indian stock exchange filings.
+Analyze this corporate announcement and return ONE JSON object only. No markdown. No explanation. No thinking tags.
 
-Document text:
+DOCUMENT:
 {text}
 
-Return ONLY the JSON object. No markdown, no explanation, no preamble."""
-
-SCORING_PROMPT = """You are a senior equity research analyst at a top Indian brokerage house.
-
-Evaluate this corporate announcement and score it across 5 dimensions. Each dimension is scored 0-20.
-
-Announcement Summary:
-- Company: {company_name}
-- Type: {announcement_type}
-- Financial Value: {financial_value}
-- Sector: {sector}
-- Time Horizon: {time_horizon}
-- Summary: {summary}
-
-Score each dimension strictly on a 0-20 scale:
-
-1. FINANCIAL_MAGNITUDE (0-20): How significant is the financial value?
-   - 0-5: Negligible or no financial value mentioned
-   - 6-10: Moderate value (< ₹50 Cr or unclear)
-   - 11-15: Significant value (₹50-500 Cr)
-   - 16-20: Very large value (> ₹500 Cr or transformative)
-
-2. SECTOR_SENSITIVITY (0-20): How market-sensitive is this sector?
-   - 0-5: Low sensitivity (generic services)
-   - 6-10: Moderate (IT services, FMCG)
-   - 11-15: High (infrastructure, manufacturing, energy)
-   - 16-20: Very high (defense, critical infrastructure, banking)
-
-3. REVENUE_CONTRIBUTION (0-20): Potential % contribution to company revenue?
-   - 0-5: Negligible contribution
-   - 6-10: Minor (<5% revenue)
-   - 11-15: Moderate (5-15% revenue)
-   - 16-20: Major (>15% revenue or strategic)
-
-4. ANNOUNCEMENT_CREDIBILITY (0-20): Quality and credibility of the announcement?
-   - 0-5: Vague, no counterparty, speculative
-   - 6-10: Basic filing with limited details
-   - 11-15: Clear announcement with named counterparty
-   - 16-20: High-credibility (govt contract, major PSU, international, audited)
-
-5. MARKET_IMPACT_POTENTIAL (0-20): Likely short-to-medium term stock price impact?
-   - 0-5: Minimal expected market reaction
-   - 6-10: Mild positive/negative reaction expected
-   - 11-15: Notable reaction, analyst attention likely
-   - 16-20: Strong catalyst, significant price movement expected
-
-Return ONLY a valid JSON object:
+Return exactly this JSON structure:
 {{
-  "financial_magnitude": {{"score": number, "reasoning": "one sentence explanation"}},
-  "sector_sensitivity": {{"score": number, "reasoning": "one sentence explanation"}},
-  "revenue_contribution": {{"score": number, "reasoning": "one sentence explanation"}},
-  "announcement_credibility": {{"score": number, "reasoning": "one sentence explanation"}},
-  "market_impact_potential": {{"score": number, "reasoning": "one sentence explanation"}},
-  "overall_justification": "2-3 sentence overall assessment of why this scored as it did",
-  "analyst_note": "one sharp insight a stock market analyst would highlight about this announcement"
+  "company_name": "full company name from the document header",
+  "ticker": "NSE/BSE ticker if present else null",
+  "announcement_type": "Order Win or GST Demand or Acquisition or Joint Venture or Regulatory Filing or Other",
+  "financial_value": "monetary value string like Rs.250 Cr or null",
+  "financial_value_inr_crore": 250,
+  "sector": "industry sector",
+  "counterparty": "client or authority name or null",
+  "time_horizon": "Short-term (0-6 months) or Medium-term (6-18 months) or Long-term (18+ months) or Unknown",
+  "summary": "2-3 sentence plain English summary of what was announced",
+  "key_facts": ["fact1", "fact2", "fact3"],
+  "scores": {{
+    "financial_magnitude": {{"score": 12, "reason": "one sentence"}},
+    "sector_sensitivity": {{"score": 14, "reason": "one sentence"}},
+    "revenue_contribution": {{"score": 10, "reason": "one sentence"}},
+    "announcement_credibility": {{"score": 15, "reason": "one sentence"}},
+    "market_impact_potential": {{"score": 12, "reason": "one sentence"}}
+  }},
+  "analyst_note": "one sharp market insight about this announcement"
 }}
 
-Return ONLY the JSON. No markdown."""
+Scoring guide (score 0-20 each):
+financial_magnitude: 0-5=none, 6-10=under Rs50Cr, 11-15=Rs50-500Cr, 16-20=over Rs500Cr
+sector_sensitivity: 0-5=generic, 6-10=IT/FMCG, 11-15=infra/energy, 16-20=defense/banking
+revenue_contribution: 0-5=negligible, 6-10=under 5pct, 11-15=5-15pct, 16-20=over 15pct
+announcement_credibility: 0-5=vague, 6-10=basic filing, 11-15=named counterparty, 16-20=govt/PSU contract
+market_impact_potential: 0-5=no reaction, 6-10=mild, 11-15=analyst attention, 16-20=strong catalyst"""
 
 
-def _call_openrouter(prompt: str, max_tokens: int = 1000) -> str:
-    """Make a single call to OpenRouter API."""
+def _strip_thinking(text: str) -> str:
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<reasoning>.*?</reasoning>", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
+def _call_openrouter(prompt: str, max_tokens: int = 1200, cancelled_flag: list = None) -> str:
+    """
+    Try each model once. On 429 → skip immediately (preserve quota).
+    On 404 → skip (model unavailable). On 5xx → one retry.
+    cancelled_flag: a mutable list [False] — set to [True] to abort mid-flight.
+    """
     if not OPENROUTER_API_KEY:
-        raise ValueError("OPENROUTER_API_KEY not set in environment")
+        raise ValueError("OPENROUTER_API_KEY not set in .env file")
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -104,41 +77,103 @@ def _call_openrouter(prompt: str, max_tokens: int = 1000) -> str:
         "X-Title": "Corporate Impact Scorer",
     }
 
-    payload = {
-        "model": MODEL,
-        "max_tokens": max_tokens,
-        "temperature": 0.1,  # Low temp for consistent structured output
-        "messages": [{"role": "user", "content": prompt}],
-    }
+    last_error = None
 
-    with httpx.Client(timeout=60) as client:
-        response = client.post(OPENROUTER_URL, json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
+    for model in MODELS:
+        # Check cancellation before each model attempt
+        if cancelled_flag and cancelled_flag[0]:
+            raise Exception("Job cancelled by user")
 
-    return data["choices"][0]["message"]["content"]
+        print(f"[OpenRouter] Trying: {model}")
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+        try:
+            with httpx.Client(timeout=60) as client:
+                response = client.post(OPENROUTER_URL, json=payload, headers=headers)
+
+            if response.status_code == 429:
+                print(f"[OpenRouter] 429 on {model} — skipping (quota preserved)")
+                last_error = f"429 rate limit on {model}"
+                time.sleep(2)
+                continue
+
+            if response.status_code in (400, 404):
+                print(f"[OpenRouter] {response.status_code} on {model} — unavailable, skipping")
+                last_error = f"{response.status_code} on {model}"
+                continue
+
+            if response.status_code >= 500:
+                print(f"[OpenRouter] {response.status_code} on {model} — retrying once...")
+                time.sleep(8)
+                with httpx.Client(timeout=60) as client:
+                    response = client.post(OPENROUTER_URL, json=payload, headers=headers)
+                if not response.ok:
+                    last_error = f"5xx on {model}"
+                    continue
+
+            response.raise_for_status()
+            data = response.json()
+
+            if not data.get("choices"):
+                last_error = "Empty choices"
+                continue
+
+            content = data["choices"][0]["message"]["content"]
+            if not content or not content.strip():
+                last_error = "Empty content"
+                continue
+
+            print(f"[OpenRouter] SUCCESS via: {data.get('model', model)}")
+            return content
+
+        except httpx.TimeoutException:
+            print(f"[OpenRouter] Timeout on {model} — skipping")
+            last_error = f"Timeout on {model}"
+            continue
+        except httpx.RequestError as e:
+            print(f"[OpenRouter] Network error on {model}: {e}")
+            last_error = str(e)
+            continue
+
+    raise Exception(
+        f"All {len(MODELS)} models failed. Last error: {last_error}\n"
+        "Check openrouter.ai/models for current free model availability."
+    )
 
 
 def _parse_json_response(raw: str) -> dict:
-    """Safely parse JSON from LLM response, stripping markdown if present."""
-    # Strip markdown code fences
-    cleaned = re.sub(r"```(?:json)?\n?", "", raw).strip()
-    cleaned = cleaned.rstrip("`").strip()
-    return json.loads(cleaned)
+    cleaned = _strip_thinking(raw)
+    cleaned = re.sub(r"```(?:json)?\n?", "", cleaned).strip().rstrip("`").strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError(f"No JSON object found. Preview: {raw[:200]}")
+    return json.loads(cleaned[start:end + 1])
 
 
-def extract_document_info(text: str) -> dict:
-    """Extract structured info from document text using LLM."""
-    # Truncate text to avoid token limits (keep first 3000 chars - most info is up top)
-    truncated = text[:3000] if len(text) > 3000 else text
+def _compute_rating(total: int):
+    if total >= 80:
+        return "TRANSFORMATIVE", "#FFB000"
+    elif total >= 60:
+        return "MAJOR", "#00D4FF"
+    elif total >= 40:
+        return "MATERIAL", "#00FF88"
+    elif total >= 20:
+        return "EMERGING", "#94A3B8"
+    return "LIMITED", "#64748B"
 
-    prompt = EXTRACTION_PROMPT.format(text=truncated)
-    try:
-        raw = _call_openrouter(prompt, max_tokens=800)
-        return _parse_json_response(raw)
-    except json.JSONDecodeError as e:
-        return {
-            "company_name": "Unknown",
+
+def _error_result(label: str, error: str) -> dict:
+    dims = ["financial_magnitude", "sector_sensitivity", "revenue_contribution",
+            "announcement_credibility", "market_impact_potential"]
+    return {
+        "extracted": {
+            "company_name": label,
             "ticker": None,
             "announcement_type": "Unknown",
             "financial_value": None,
@@ -146,73 +181,55 @@ def extract_document_info(text: str) -> dict:
             "sector": "Unknown",
             "counterparty": None,
             "time_horizon": "Unknown",
-            "summary": "Could not parse document",
+            "summary": f"Analysis failed: {error}",
             "key_facts": [],
-            "parse_error": str(e),
-        }
-
-
-def score_announcement(extracted_info: dict) -> dict:
-    """Score an announcement across 5 dimensions using LLM."""
-    prompt = SCORING_PROMPT.format(
-        company_name=extracted_info.get("company_name", "Unknown"),
-        announcement_type=extracted_info.get("announcement_type", "Unknown"),
-        financial_value=extracted_info.get("financial_value", "Not mentioned"),
-        sector=extracted_info.get("sector", "Unknown"),
-        time_horizon=extracted_info.get("time_horizon", "Unknown"),
-        summary=extracted_info.get("summary", "No summary available"),
-    )
-
-    try:
-        raw = _call_openrouter(prompt, max_tokens=800)
-        scores = _parse_json_response(raw)
-
-        # Compute total score
-        dimensions = [
-            "financial_magnitude",
-            "sector_sensitivity",
-            "revenue_contribution",
-            "announcement_credibility",
-            "market_impact_potential",
-        ]
-        total = sum(scores[d]["score"] for d in dimensions if d in scores)
-        scores["total_score"] = total
-        scores["max_score"] = 100
-        scores["score_percentage"] = round((total / 100) * 100, 1)
-
-        # Assign rating tier
-        if total >= 80:
-            scores["rating"] = "CRITICAL"
-            scores["rating_color"] = "#FF4444"
-        elif total >= 60:
-            scores["rating"] = "HIGH"
-            scores["rating_color"] = "#FF8C00"
-        elif total >= 40:
-            scores["rating"] = "MODERATE"
-            scores["rating_color"] = "#FFD700"
-        elif total >= 20:
-            scores["rating"] = "LOW"
-            scores["rating_color"] = "#4CAF50"
-        else:
-            scores["rating"] = "MINIMAL"
-            scores["rating_color"] = "#9E9E9E"
-
-        return scores
-
-    except Exception as e:
-        return {
+            "analyst_note": None,
+        },
+        "scores": {
+            **{d: {"score": 0, "reason": "error"} for d in dims},
             "total_score": 0,
-            "error": str(e),
+            "max_score": 100,
+            "score_percentage": 0.0,
             "rating": "ERROR",
             "rating_color": "#9E9E9E",
-        }
-
-
-def analyze_document(text: str) -> dict:
-    """Full analysis pipeline: extract info + score."""
-    extracted = extract_document_info(text)
-    scores = score_announcement(extracted)
-    return {
-        "extracted": extracted,
-        "scores": scores,
+            "overall_justification": error,
+            "analyst_note": "",
+        },
     }
+
+
+def analyze_document(text: str, label: str = "Unknown", cancelled_flag: list = None) -> dict:
+    """Single LLM call: extract info + score in one shot."""
+    truncated = text[:3000] if len(text) > 3000 else text
+    prompt = COMBINED_PROMPT.format(text=truncated)
+
+    try:
+        raw = _call_openrouter(prompt, max_tokens=1200, cancelled_flag=cancelled_flag)
+        result = _parse_json_response(raw)
+    except Exception as e:
+        print(f"[Analyzer] FAILED for '{label}': {e}")
+        return _error_result(label, str(e))
+
+    scores_raw = result.pop("scores", {})
+    dims = ["financial_magnitude", "sector_sensitivity", "revenue_contribution",
+            "announcement_credibility", "market_impact_potential"]
+    total = sum(scores_raw.get(d, {}).get("score", 0) for d in dims)
+    rating, color = _compute_rating(total)
+
+    company = result.get("company_name", "")
+    if not company or company.strip().lower() in ("unknown", ""):
+        result["company_name"] = label
+
+    scores = {
+        **{d: scores_raw.get(d, {"score": 0, "reason": "not scored"}) for d in dims},
+        "total_score": total,
+        "max_score": 100,
+        "score_percentage": round(total / 100 * 100, 1),
+        "rating": rating,
+        "rating_color": color,
+        "overall_justification": result.get("analyst_note", ""),
+        "analyst_note": result.get("analyst_note", ""),
+    }
+
+    print(f"[Analyzer] OK: {result.get('company_name')} | {total}/100 | {rating}")
+    return {"extracted": result, "scores": scores}

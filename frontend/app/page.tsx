@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import {
-  startAnalysis, pollJob, getDefaultPDFs,
+  startAnalysis, pollJob, cancelJob, getDefaultPDFs, uploadPDF,
   type AnalysisResult, type PDFMeta
 } from "./lib/api";
 import ScoreCard from "./components/ScoreCard";
@@ -9,18 +9,46 @@ import ProcessingPanel from "./components/ProcessingPanel";
 import RankingLeaderboard from "./components/RankingLeaderboard";
 
 type AppState = "idle" | "processing" | "completed" | "error";
+type Mode = "default" | "upload";
+type View = "cards" | "ranking";
+
+const DEFAULT_DOCS = [
+  { id: "pdf1", label: "BHELCC — Info to SE", sub: "NSE · Jun 2026", url: "https://nsearchives.nseindia.com/corporate/BHELCC_05062026113257_Info_to_SE_05_06_2026.pdf" },
+  { id: "pdf2", label: "BLUSPRING — Reg 30 BALCO", sub: "NSE · Jun 2026", url: "https://nsearchives.nseindia.com/corporate/BLUSPRING_05062026130923_Reg_30_-_SESI-BALCO.pdf" },
+  { id: "pdf3", label: "ETHOS — GST Order Disclosure", sub: "NSE · Jun 2026", url: "https://nsearchives.nseindia.com/corporate/ETHOS_05062026160606_Disclosure_GST_Order.pdf" },
+  { id: "pdf4", label: "EDUTECH — Reg 30 Disclosure", sub: "NSE · Jun 2026", url: "https://nsearchives.nseindia.com/corporate/EDUTECH_05062026174716_Disclosure_Reg_30_EDUTECH_05062026.pdf" },
+  { id: "pdf5", label: "BSE Filing — Corporate Action", sub: "BSE · Jun 2026", url: "https://www.bseindia.com/xml-data/corpfiling/AttachLive/cc79e53e-be66-400d-82db-6e88c3a42188.pdf" },
+];
+
+const DIMS = [
+  { icon: "₹", label: "Financial Magnitude", desc: "Order / contract value" },
+  { icon: "⚡", label: "Sector Sensitivity", desc: "Market-moving potential" },
+  { icon: "↗", label: "Revenue Contribution", desc: "% impact on revenues" },
+  { icon: "◈", label: "Credibility", desc: "Counterparty quality" },
+  { icon: "◎", label: "Market Impact", desc: "Price movement catalyst" },
+];
 
 export default function Home() {
-  const [appState, setAppState] = useState<AppState>("idle");
-  const [progress, setProgress] = useState(0);
-  const [results, setResults] = useState<AnalysisResult[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [mode, setMode]           = useState<Mode>("default");
+  const [appState, setAppState]   = useState<AppState>("idle");
+  const [progress, setProgress]   = useState(0);
+  const [results, setResults]     = useState<AnalysisResult[]>([]);
+  const [error, setError]         = useState<string | null>(null);
   const [defaultPDFs, setDefaultPDFs] = useState<PDFMeta[]>([]);
+  const [apiKey, setApiKey]       = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [showApiInput, setShowApiInput] = useState(false);
-  const [view, setView] = useState<"cards" | "ranking">("cards");
-  const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const [showApiModal, setShowApiModal] = useState(false);
+  const [view, setView]           = useState<View>("cards");
+  const [jobId, setJobId]         = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Upload state
+  const [uploadFile, setUploadFile]     = useState<File | null>(null);
+  const [uploadState, setUploadState]   = useState<"idle"|"uploading"|"done"|"error">("idle");
+  const [uploadResult, setUploadResult] = useState<AnalysisResult | null>(null);
+  const [uploadError, setUploadError]   = useState<string | null>(null);
+  const [dragOver, setDragOver]         = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     getDefaultPDFs().then(setDefaultPDFs).catch(() => {});
@@ -28,9 +56,7 @@ export default function Home() {
     if (saved) setApiKey(saved);
   }, []);
 
-  const stopPolling = () => {
-    if (pollRef.current) clearInterval(pollRef.current);
-  };
+  const stopPolling = () => { if (pollRef.current) clearInterval(pollRef.current); };
 
   const startPolling = (jid: string) => {
     stopPolling();
@@ -38,224 +64,353 @@ export default function Home() {
       try {
         const job = await pollJob(jid);
         setProgress(job.progress);
-        if (job.results && job.results.length > 0) setResults(job.results);
+        if (job.results?.length) setResults(job.results);
         if (job.status === "completed") { stopPolling(); setAppState("completed"); }
+        else if (job.status === "cancelled") { stopPolling(); setAppState("idle"); setResults([]); }
         else if (job.status === "failed") { stopPolling(); setError(job.error || "Analysis failed"); setAppState("error"); }
-      } catch (e) { console.error("Poll error:", e); }
+      } catch (e) { console.error(e); }
     }, 2000);
   };
 
   const handleStart = async () => {
-    if (!apiKey) { setShowApiInput(true); return; }
+    if (!apiKey) { setShowApiModal(true); return; }
     setAppState("processing"); setProgress(0); setResults([]); setError(null);
     try {
       const { job_id } = await startAnalysis();
+      setJobId(job_id);
       startPolling(job_id);
-    } catch (e: any) { setError(e.message || "Failed to start"); setAppState("error"); }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to start");
+      setAppState("error");
+    }
   };
 
-  const handleSaveKey = () => {
-    localStorage.setItem("openrouter_api_key", apiKeyInput);
-    setApiKey(apiKeyInput); setShowApiInput(false);
+  const handleCancel = async () => {
+    if (jobId) { try { await cancelJob(jobId); } catch {} }
+    stopPolling(); setAppState("idle"); setResults([]); setProgress(0); setJobId(null);
   };
 
-  const handleReset = () => { stopPolling(); setAppState("idle"); setResults([]); setProgress(0); setError(null); };
+  const handleReset = () => { stopPolling(); setAppState("idle"); setResults([]); setProgress(0); setError(null); setJobId(null); };
+  const handleSaveKey = () => { localStorage.setItem("openrouter_api_key", apiKeyInput); setApiKey(apiKeyInput); setShowApiModal(false); };
+  const handleModeSwitch = (m: Mode) => { setMode(m); handleReset(); setUploadFile(null); setUploadState("idle"); setUploadResult(null); setUploadError(null); };
+
+  const handleFileDrop = (e: React.DragEvent) => {
+    e.preventDefault(); setDragOver(false);
+    const f = e.dataTransfer.files[0];
+    if (f?.type === "application/pdf") setUploadFile(f);
+  };
+
+  const handleUploadAnalyze = async () => {
+    if (!uploadFile) return;
+    if (!apiKey) { setShowApiModal(true); return; }
+    setUploadState("uploading"); setUploadError(null); setUploadResult(null);
+    try { setUploadResult(await uploadPDF(uploadFile)); setUploadState("done"); }
+    catch (e: unknown) { setUploadError(e instanceof Error ? e.message : "Failed"); setUploadState("error"); }
+  };
 
   const completedCount = results.filter(r => r.status === "completed").length;
-  const avgScore = results.length > 0 ? Math.round(results.reduce((s, r) => s + (r.scores?.total_score ?? 0), 0) / results.length) : 0;
+  const avgScore = results.length > 0
+    ? Math.round(results.reduce((s, r) => s + (r.scores?.total_score ?? 0), 0) / results.length) : 0;
   const topResult = [...results].sort((a, b) => (b.scores?.total_score ?? 0) - (a.scores?.total_score ?? 0))[0];
+  const docs = defaultPDFs.length > 0 ? defaultPDFs : DEFAULT_DOCS;
 
   return (
-    <main className="min-h-screen grid-bg">
-      <div className="fixed inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-[-20%] left-[10%] w-[500px] h-[500px] bg-[#00D4FF] opacity-[0.03] rounded-full blur-[100px]" />
-        <div className="absolute bottom-[-10%] right-[5%] w-[400px] h-[400px] bg-[#00FF88] opacity-[0.03] rounded-full blur-[100px]" />
-      </div>
-
-      <div className="relative max-w-7xl mx-auto px-4 py-8">
-        {/* Header */}
-        <div className="mb-10">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="flex gap-1">
-              <div className="w-2 h-2 rounded-full bg-[#00D4FF] animate-pulse" />
-              <div className="w-2 h-2 rounded-full bg-[#00FF88] animate-pulse" style={{ animationDelay: "0.3s" }} />
-              <div className="w-2 h-2 rounded-full bg-[#FFB800] animate-pulse" style={{ animationDelay: "0.6s" }} />
-            </div>
-            <span className="text-[10px] font-mono text-[#3A4A5C]">SEBI REGULATORY INTELLIGENCE SYSTEM v1.0</span>
-          </div>
-          <h1 className="text-3xl md:text-4xl font-bold text-[#C8D8E8] tracking-tight">
-            Corporate Action<span className="text-[#00D4FF]"> Impact</span> Scorer
-          </h1>
-          <p className="text-[#5A7A9A] text-sm mt-2 max-w-xl">
-            AI-powered analysis of NSE/BSE filings. Extracts key data, scores across 5 market dimensions, and ranks corporate announcements by potential stock impact.
-          </p>
-          <div className="flex flex-wrap gap-2 mt-3">
-            {["FastAPI", "Mistral-7B (OpenRouter)", "pdfplumber", "Next.js 14", "Recharts"].map(t => (
-              <span key={t} className="text-[9px] font-mono text-[#3A4A5C] border border-[#1A2332] px-2 py-0.5 rounded">{t}</span>
+    <div className="app-bg min-h-screen">
+      {/* ── Ticker tape bar ────────────────────────────
+      <div style={{ background: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}>
+        <div className="ticker-wrap py-1.5">
+          <div className="ticker-track">
+            {[...docs, ...docs].map((d, i) => (
+              <span key={i} className="inline-flex items-center gap-2 mx-8 text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
+                <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: "var(--accent)" }} />
+                {d.label}
+              </span>
             ))}
+          </div>
+        </div> */}
+      {/* </div> */}
+
+      <div className="max-w-7xl mx-auto px-5 py-8">
+        {/* ── Header ───────────────────────────────── */}
+        <div className="mb-10">
+          <p className="text-[10px] font-mono tracking-widest mb-3" style={{ color: "var(--text-muted)" }}>
+            SEBI REGULATORY INTELLIGENCE · NSE/BSE ANALYSIS SYSTEM
+          </p>
+          <h1 className="text-4xl font-bold tracking-tight leading-none mb-3" style={{ color: "var(--text-primary)" }}>
+            Corporate Filing<br />
+            <span style={{ color: "var(--accent)" }}>Impact Scorer</span>
+          </h1>
+          <p className="text-sm max-w-md" style={{ color: "var(--text-secondary)" }}>
+            Ingests NSE/BSE filings, extracts key data, and ranks announcements by market impact across five analytical dimensions.
+          </p>
+
+          {/* API key status — subtle, not a badge parade */}
+          <div className="flex items-center gap-3 mt-4">
+            {apiKey ? (
+              <button onClick={() => setShowApiModal(true)} className="flex items-center gap-1.5 text-[10px] font-mono" style={{ color: "var(--positive)" }}>
+                <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--positive)", display: "inline-block" }} />
+                API key active
+                <span style={{ color: "var(--text-muted)" }}>(change)</span>
+              </button>
+            ) : (
+              <button onClick={() => setShowApiModal(true)} className="flex items-center gap-1.5 text-[10px] font-mono" style={{ color: "var(--amber)" }}>
+                <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--amber)", display: "inline-block" }} />
+                Set OpenRouter API key
+              </button>
+            )}
           </div>
         </div>
 
-        {/* API Key modal */}
-        {showApiInput && (
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-[#0F1623] border border-[#1A2332] rounded-xl p-6 w-full max-w-md">
-              <h3 className="text-sm font-semibold text-[#C8D8E8] mb-1">OpenRouter API Key Required</h3>
-              <p className="text-[11px] text-[#5A7A9A] mb-4">Get a free key at <a href="https://openrouter.ai" target="_blank" className="text-[#00D4FF]">openrouter.ai</a>. Stored in your browser only.</p>
-              <input type="password" value={apiKeyInput} onChange={e => setApiKeyInput(e.target.value)} placeholder="sk-or-v1-..."
-                className="w-full bg-[#0A0E17] border border-[#1A2332] text-[#C8D8E8] text-sm font-mono rounded-lg px-3 py-2.5 focus:outline-none focus:border-[#00D4FF] mb-3" />
+        {/* ── Mode tabs ────────────────────────────── */}
+        <div className="flex gap-1 p-1 rounded-lg w-fit mb-8" style={{ background: "var(--bg-surface)", border: "1px solid var(--border)" }}>
+          <button className={`tab ${mode === "default" ? "active" : ""}`} onClick={() => handleModeSwitch("default")}>
+            NSE/BSE Filings
+          </button>
+          <button className={`tab ${mode === "upload" ? "active" : ""}`} onClick={() => handleModeSwitch("upload")}>
+            Upload PDF
+          </button>
+        </div>
+
+        {/* ── API key modal ─────────────────────────── */}
+        {showApiModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)" }}>
+            <div className="card w-full max-w-sm p-6">
+              <h3 className="text-sm font-semibold mb-1" style={{ color: "var(--text-primary)" }}>OpenRouter API Key</h3>
+              <p className="text-[11px] mb-4" style={{ color: "var(--text-muted)" }}>
+                Free at <a href="https://openrouter.ai" target="_blank" className="underline" style={{ color: "var(--accent)" }}>openrouter.ai</a> · Stored in your browser only
+              </p>
+              <input
+                className="input-field mb-3"
+                type="password"
+                value={apiKeyInput}
+                onChange={e => setApiKeyInput(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && handleSaveKey()}
+                placeholder="sk-or-v1-..."
+              />
               <div className="flex gap-2">
-                <button onClick={handleSaveKey} className="flex-1 bg-[#00D4FF] text-[#0A0E17] text-sm font-semibold py-2 rounded-lg hover:bg-[#00B8E6]">Save & Continue</button>
-                <button onClick={() => setShowApiInput(false)} className="px-4 border border-[#1A2332] text-[#5A7A9A] text-sm py-2 rounded-lg">Cancel</button>
+                <button className="btn-primary flex-1" onClick={handleSaveKey}>Save & Continue</button>
+                <button className="btn-ghost" onClick={() => setShowApiModal(false)}>Cancel</button>
               </div>
             </div>
           </div>
         )}
 
-        {/* IDLE */}
-        {appState === "idle" && (
-          <div className="space-y-6">
-            <div className="bg-[#0F1623] border border-[#1A2332] rounded-xl overflow-hidden">
-              <div className="px-5 py-4 border-b border-[#1A2332]">
-                <h2 className="text-sm font-semibold text-[#C8D8E8]">Documents Queued for Analysis</h2>
-                <p className="text-[10px] text-[#5A7A9A] font-mono mt-0.5">NSE & BSE corporate filings · June 2026</p>
-              </div>
-              <div className="divide-y divide-[#1A2332]">
-                {(defaultPDFs.length > 0 ? defaultPDFs : [
-                  { id: "1", label: "BHELCC — Info to SE (NSE)", url: "" },
-                  { id: "2", label: "BLUSPRING — Reg 30 SESI-BALCO (NSE)", url: "" },
-                  { id: "3", label: "ETHOS — GST Order Disclosure (NSE)", url: "" },
-                  { id: "4", label: "EDUTECH — Reg 30 Disclosure (NSE)", url: "" },
-                  { id: "5", label: "BSE Filing — Corporate Action", url: "" },
-                ]).map((pdf, i) => (
-                  <div key={pdf.id} className="flex items-center gap-3 px-5 py-3 hover:bg-[#1A2332]/30 transition-colors">
-                    <span className="text-[10px] font-mono text-[#3A4A5C] w-5">{String(i + 1).padStart(2, "0")}</span>
-                    <div className="w-1.5 h-1.5 rounded-full bg-[#00D4FF] opacity-50" />
-                    <span className="text-[11px] text-[#C8D8E8] flex-1">{pdf.label}</span>
-                    {pdf.url && <span className="text-[9px] font-mono text-[#3A4A5C] hidden sm:block">{new URL(pdf.url).hostname}</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
+        {/* ══════════════════════════════════════════ */}
+        {/*  UPLOAD MODE                               */}
+        {/* ══════════════════════════════════════════ */}
+        {mode === "upload" && (
+          <div className="max-w-lg space-y-5">
+            {uploadState === "idle" && (
+              <div className="card p-6">
+                <h2 className="text-sm font-semibold mb-1" style={{ color: "var(--text-primary)" }}>Analyse Any Corporate Filing</h2>
+                <p className="text-[11px] mb-5" style={{ color: "var(--text-muted)" }}>Upload any NSE/BSE PDF and get an instant AI impact score.</p>
 
-            <div className="bg-[#0F1623] border border-[#1A2332] rounded-xl p-5">
-              <p className="text-[10px] font-mono text-[#5A7A9A] mb-3">SCORING FRAMEWORK — 5 DIMENSIONS × 20 PTS = 100 MAX</p>
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-                {[
-                  { icon: "₹", label: "Financial Magnitude", desc: "Order/contract value" },
-                  { icon: "⚡", label: "Sector Sensitivity", desc: "Market sensitivity" },
-                  { icon: "📈", label: "Revenue Contribution", desc: "% revenue impact" },
-                  { icon: "🏛", label: "Credibility", desc: "Filing quality" },
-                  { icon: "🎯", label: "Market Impact", desc: "Price movement potential" },
-                ].map(d => (
-                  <div key={d.label} className="bg-[#0A0E17] rounded-lg p-3 text-center border border-[#1A2332]">
-                    <div className="text-xl mb-1">{d.icon}</div>
-                    <div className="text-[10px] font-semibold text-[#C8D8E8]">{d.label}</div>
-                    <div className="text-[9px] text-[#5A7A9A] mt-0.5">{d.desc}</div>
-                    <div className="text-[9px] font-mono text-[#00D4FF] mt-1">0 – 20 pts</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex flex-col sm:flex-row gap-3 items-start">
-              <button onClick={handleStart}
-                className="flex items-center gap-2 bg-[#00D4FF] text-[#0A0E17] font-bold text-sm px-6 py-3 rounded-xl hover:bg-[#00B8E6] transition-all hover:scale-105 active:scale-95">
-                ▶ Run Full Analysis
-              </button>
-              {!apiKey ? (
-                <button onClick={() => setShowApiInput(true)}
-                  className="text-[11px] font-mono text-[#FFB800] border border-[#FFB80030] px-4 py-3 rounded-xl hover:border-[#FFB800] transition-colors">
-                  ⚠ Set OpenRouter API Key first
-                </button>
-              ) : (
-                <div className="flex items-center gap-2 text-[11px] font-mono text-[#00FF88] border border-[#00FF8820] px-4 py-3 rounded-xl">
-                  ✓ API key configured
-                  <button onClick={() => setShowApiInput(true)} className="text-[#5A7A9A] hover:text-[#C8D8E8] ml-1">(change)</button>
+                <div
+                  className={`drop-zone p-10 text-center ${dragOver ? "drag-over" : ""} ${uploadFile ? "has-file" : ""}`}
+                  onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={handleFileDrop}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <input ref={fileInputRef} type="file" accept=".pdf" onChange={e => { const f = e.target.files?.[0]; if (f) setUploadFile(f); }} className="hidden" />
+                  {uploadFile ? (
+                    <>
+                      <div className="text-2xl mb-2">📄</div>
+                      <p className="text-sm font-medium" style={{ color: "var(--positive)" }}>{uploadFile.name}</p>
+                      <p className="text-[10px] mt-1" style={{ color: "var(--text-muted)" }}>{(uploadFile.size / 1024).toFixed(1)} KB · click to change</p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="text-3xl mb-3">↑</div>
+                      <p className="text-sm" style={{ color: "var(--text-secondary)" }}>Drop PDF here or <span style={{ color: "var(--accent)" }}>browse</span></p>
+                      <p className="text-[10px] mt-1" style={{ color: "var(--text-muted)" }}>PDF files only</p>
+                    </>
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
-        )}
 
-        {/* PROCESSING */}
-        {appState === "processing" && (
-          <div>
-            <ProcessingPanel progress={progress} currentLabel={results.length < 5 ? defaultPDFs[results.length]?.label : undefined} completed={completedCount} total={5} />
-            {results.length > 0 && (
-              <div className="mt-10 space-y-4">
-                <p className="text-[10px] font-mono text-[#3A4A5C]">PARTIAL RESULTS — UPDATING LIVE ↓</p>
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                  {results.map((result, i) => <ScoreCard key={result.id} result={result} animationDelay={i * 100} />)}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ERROR */}
-        {appState === "error" && (
-          <div className="max-w-xl mx-auto text-center">
-            <div className="bg-[#0F1623] border border-[#FF444430] rounded-xl p-8">
-              <div className="text-4xl mb-4">⚠</div>
-              <h3 className="text-[#FF4444] font-semibold mb-2">Analysis Failed</h3>
-              <p className="text-[11px] font-mono text-[#5A7A9A] mb-4">{error}</p>
-              <button onClick={handleReset} className="bg-[#1A2332] text-[#C8D8E8] text-sm px-6 py-2 rounded-lg hover:bg-[#2A3F55] transition-colors">Try Again</button>
-            </div>
-          </div>
-        )}
-
-        {/* COMPLETED */}
-        {appState === "completed" && results.length > 0 && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {[
-                { label: "DOCUMENTS ANALYZED", value: String(results.length), unit: "filings", color: "#00D4FF" },
-                { label: "SUCCESSFULLY FETCHED", value: String(completedCount), unit: `/ ${results.length}`, color: "#00FF88" },
-                { label: "AVG IMPACT SCORE", value: String(avgScore), unit: "/ 100", color: "#FFB800" },
-                { label: "HIGHEST RATING", value: topResult?.scores?.rating || "—", unit: topResult?.extracted?.company_name?.split(" ")[0] || "", color: topResult?.scores?.rating_color || "#555" },
-              ].map(stat => (
-                <div key={stat.label} className="bg-[#0F1623] border border-[#1A2332] rounded-xl p-4">
-                  <p className="text-[9px] font-mono text-[#3A4A5C] mb-1">{stat.label}</p>
-                  <p className="text-2xl font-bold font-mono" style={{ color: stat.color }}>{stat.value}</p>
-                  <p className="text-[10px] text-[#5A7A9A]">{stat.unit}</p>
-                </div>
-              ))}
-            </div>
-
-            <div className="flex items-center justify-between">
-              <div className="flex bg-[#0F1623] border border-[#1A2332] rounded-lg p-1 gap-1">
-                {(["cards", "ranking"] as const).map(v => (
-                  <button key={v} onClick={() => setView(v)}
-                    className={`text-[11px] font-mono px-4 py-1.5 rounded-md transition-all ${view === v ? "bg-[#1A2332] text-[#C8D8E8]" : "text-[#5A7A9A] hover:text-[#C8D8E8]"}`}>
-                    {v === "cards" ? "📋 Score Cards" : "🏆 Rankings"}
+                <div className="flex gap-3 mt-4">
+                  <button className="btn-primary" onClick={handleUploadAnalyze} disabled={!uploadFile}>
+                    ▶ Analyse
                   </button>
-                ))}
+                </div>
               </div>
-              <button onClick={handleReset} className="text-[11px] font-mono text-[#5A7A9A] border border-[#1A2332] px-4 py-2 rounded-lg hover:border-[#2A3F55] hover:text-[#C8D8E8] transition-all">
-                ↺ New Analysis
-              </button>
-            </div>
+            )}
 
-            {view === "ranking" && <RankingLeaderboard results={results} />}
-            {view === "cards" && (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {[...results].sort((a, b) => (b.scores?.total_score ?? 0) - (a.scores?.total_score ?? 0))
-                  .map((result, i) => <ScoreCard key={result.id} result={result} animationDelay={i * 100} />)}
+            {uploadState === "uploading" && (
+              <div className="card p-8 text-center scan-wrap">
+                <div className="text-2xl mb-3" style={{ color: "var(--accent)" }}>⟳</div>
+                <p className="text-sm font-mono" style={{ color: "var(--text-primary)" }}>Analysing {uploadFile?.name}</p>
+                <p className="text-[11px] mt-2" style={{ color: "var(--text-muted)" }}>Extracting text · running AI scoring…</p>
+                <div className="mt-5 h-1 rounded-full overflow-hidden" style={{ background: "var(--bg-raised)" }}>
+                  <div className="h-full w-3/5 rounded-full" style={{ background: "linear-gradient(90deg, var(--accent), var(--positive))", animation: "none" }} />
+                </div>
+              </div>
+            )}
+
+            {uploadState === "error" && (
+              <div className="card p-5" style={{ borderColor: "rgba(239,68,68,0.2)" }}>
+                <p className="text-sm font-mono mb-1" style={{ color: "var(--red)" }}>⚠ Upload Failed</p>
+                <p className="text-[11px] mb-3" style={{ color: "var(--text-muted)" }}>{uploadError}</p>
+                <button className="btn-ghost" onClick={() => { setUploadState("idle"); setUploadError(null); }}>Try Again</button>
+              </div>
+            )}
+
+            {uploadState === "done" && uploadResult && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-[10px] font-mono tracking-wider" style={{ color: "var(--text-muted)" }}>ANALYSIS RESULT</p>
+                  <button className="btn-ghost" onClick={() => { setUploadState("idle"); setUploadResult(null); setUploadFile(null); }}>↺ Upload Another</button>
+                </div>
+                <ScoreCard result={uploadResult} />
               </div>
             )}
           </div>
         )}
 
-        <footer className="mt-16 pt-6 border-t border-[#1A2332] flex flex-col sm:flex-row items-center justify-between gap-2">
-          <p className="text-[10px] font-mono text-[#3A4A5C]">Corporate Impact Scorer · Built for Assessment · {new Date().getFullYear()}</p>
-          <div className="flex gap-4">
-            {["FastAPI + Next.js", "Mistral-7B via OpenRouter", "100% Free Tier"].map(t => (
-              <span key={t} className="text-[10px] font-mono text-[#3A4A5C]">{t}</span>
-            ))}
-          </div>
-        </footer>
+        {/* ══════════════════════════════════════════ */}
+        {/*  DEFAULT MODE                              */}
+        {/* ══════════════════════════════════════════ */}
+        {mode === "default" && (
+          <>
+            {/* ── IDLE ─────────────────────────────── */}
+            {appState === "idle" && (
+              <div className="space-y-5">
+                {/* Document queue + scoring framework side by side on wide screens */}
+                <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+                  {/* Queue */}
+                  <div className="card overflow-hidden lg:col-span-3">
+                    <div className="px-5 py-4" style={{ borderBottom: "1px solid var(--border)" }}>
+                      <h2 className="text-lg font-semibold" style={{ color: "var(--text-primary)" }}>Documents Queued</h2>
+                      <p className="text-[13px] font-mono mt-0.5" style={{ color: "var(--text-muted)" }}>NSE & BSE corporate filings · June 2026</p>
+                    </div>
+                    <div>
+                      {docs.map((doc, i) => (
+                        <div key={doc.id} className="flex items-center gap-4 px-5 py-3.5 transition-colors" style={{ borderBottom: i < docs.length - 1 ? "1px solid var(--border)" : "none" }}
+                          onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+                          onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                        >
+                          <span className="text-[13px] font-mono w-5 text-right flex-shrink-0" style={{ color: "var(--text-muted)" }}>{String(i + 1).padStart(2, "0")}</span>
+                          <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: "var(--accent)", opacity: 0.5 }} />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[11px] font-medium" style={{ color: "var(--text-primary)" }}>{doc.label}</p>
+                            {"sub" in doc && <p className="text-[9px] font-mono mt-0.5" style={{ color: "var(--text-muted)" }}>{(doc as typeof DEFAULT_DOCS[0]).sub}</p>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Scoring framework */}
+                  <div className="card p-5 lg:col-span-2">
+                    <p className="text-[12px] font-mono tracking-widest mb-4" style={{ color: "var(--text-muted)" }}>SCORING FRAMEWORK</p>
+                    <div className="space-y-3">
+                      {DIMS.map((d, i) => (
+                        <div key={i} className="flex items-center gap-3">
+                          <span className="w-7 h-7 rounded-lg flex items-center justify-center text-lg flex-shrink-0" style={{ background: "var(--bg-raised)", border: "1px solid var(--border)" }}>
+                            {d.icon}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[13.5px] font-medium" style={{ color: "var(--text-primary)" }}>{d.label}</p>
+                            <p className="text-[12px]" style={{ color: "var(--text-muted)" }}>{d.desc}</p>
+                          </div>
+                          <span className="text-[11px] font-mono flex-shrink-0" style={{ color: "var(--accent)" }}>0–20</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="divider my-4" />
+                    <p className="text-[12px] font-mono" style={{ color: "var(--text-muted)" }}>
+                      Total: <span style={{ color: "var(--text-primary)" }}>5 dimensions × 20 pts = <strong style={{ color: "var(--accent)" }}>100 max</strong></span>
+                    </p>
+                  </div>
+                </div>
+
+                <button className="btn-primary" onClick={handleStart}>
+                  ▶ Run Full Analysis
+                </button>
+              </div>
+            )}
+
+            {/* ── PROCESSING ───────────────────────── */}
+            {appState === "processing" && (
+              <div className="space-y-8">
+                <ProcessingPanel
+                  progress={progress}
+                  currentLabel={results.length < 5 ? docs[results.length]?.label : undefined}
+                  completed={completedCount}
+                  total={5}
+                  jobId={jobId ?? undefined}
+                  onCancel={handleCancel}
+                />
+                {results.length > 0 && (
+                  <div>
+                    <p className="text-[10px] font-mono tracking-wider mb-4" style={{ color: "var(--text-muted)" }}>PARTIAL RESULTS · LIVE</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                      {results.map((r, i) => <ScoreCard key={r.id} result={r} animationDelay={i * 80} />)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── ERROR ────────────────────────────── */}
+            {appState === "error" && (
+              <div className="max-w-md">
+                <div className="card p-8 text-center" style={{ borderColor: "rgba(239,68,68,0.2)" }}>
+                  <p className="text-3xl mb-4">⚠</p>
+                  <h3 className="text-sm font-semibold mb-2" style={{ color: "var(--red)" }}>Analysis Failed</h3>
+                  <p className="text-[11px] font-mono mb-5" style={{ color: "var(--text-muted)" }}>{error}</p>
+                  <button className="btn-ghost" onClick={handleReset}>↺ Try Again</button>
+                </div>
+              </div>
+            )}
+
+            {/* ── COMPLETED ────────────────────────── */}
+            {appState === "completed" && results.length > 0 && (
+              <div className="space-y-6">
+                {/* Stats row */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[
+                    { label: "DOCUMENTS", value: String(results.length), sub: "filings analysed", color: "var(--accent)" },
+                    { label: "SUCCESSFUL", value: `${completedCount}/${results.length}`, sub: "fetched & scored", color: "var(--positive)" },
+                    { label: "AVG SCORE", value: String(avgScore), sub: "out of 100", color: "var(--amber)" },
+                    { label: "TOP RATING", value: topResult?.scores?.rating || "—", sub: topResult?.extracted?.company_name?.split(" ")[0] || "", color: topResult?.scores?.rating_color || "var(--text-muted)" },
+                  ].map(s => (
+                    <div key={s.label} className="stat-card">
+                      <p className="text-[13px] font-mono tracking-widest mb-1.5" style={{ color: "var(--text-muted)" }}>{s.label}</p>
+                      <p className="text-2xl font-bold font-mono" style={{ color: s.color }}>{s.value}</p>
+                      <p className="text-[13px] mt-0.5" style={{ color: "var(--text-muted)" }}>{s.sub}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Controls */}
+                <div className="flex items-center justify-between">
+                  <div className="flex gap-1 p-1 rounded-lg" style={{ background: "var(--bg-surface)", border: "1px solid var(--border)" }}>
+                    <button className={`tab ${view === "cards" ? "active" : ""}`} onClick={() => setView("cards")}>Score Cards</button>
+                    <button className={`tab ${view === "ranking" ? "active" : ""}`} onClick={() => setView("ranking")}>Rankings</button>
+                  </div>
+                  <button className="btn-ghost" onClick={handleReset}>↺ New Analysis</button>
+                </div>
+
+                {view === "ranking" && <RankingLeaderboard results={results} />}
+                {view === "cards" && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {[...results].sort((a, b) => (b.scores?.total_score ?? 0) - (a.scores?.total_score ?? 0))
+                      .map((r, i) => <ScoreCard key={r.id} result={r} animationDelay={i * 80} />)}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ── Footer ───────────────────────────────── */}
+        <div className="divider mt-14 mb-4" />
+        <div className="flex items-center justify-between">
+          <p className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>Corporate Impact Scorer · {new Date().getFullYear()}</p>
+          <p className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>FastAPI · Next.js 14 · OpenRouter</p>
+        </div>
       </div>
-    </main>
+    </div>
   );
 }

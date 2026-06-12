@@ -6,10 +6,11 @@ import asyncio
 import uuid
 import json
 import os
+import time
 from datetime import datetime
 
 from pdf_fetcher import fetch_and_extract, extract_text_from_file
-from scorer import analyze_document
+from scorer import analyze_document, INTER_DOC_DELAY
 
 app = FastAPI(title="Corporate Impact Scorer API", version="1.0.0")
 
@@ -142,6 +143,11 @@ def _run_analysis_job(job_id: str, pdfs: List[dict]):
         progress = int(((i + 1) / total) * 100)
         JOBS[job_id]["progress"] = progress
         JOBS[job_id]["partial_results"] = results
+
+        # Respect free tier: 20 req/min limit. Wait between documents.
+        if i < total - 1:
+            print(f"[Job] Waiting {INTER_DOC_DELAY}s before next document (rate limit buffer)...")
+            time.sleep(INTER_DOC_DELAY)
 
     # Rank results by total score
     scored = [r for r in results if r.get("scores") and r["scores"].get("total_score", 0) > 0]

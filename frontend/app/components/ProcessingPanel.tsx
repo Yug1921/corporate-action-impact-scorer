@@ -5,83 +5,100 @@ interface Props {
   currentLabel?: string;
   completed: number;
   total: number;
+  jobId?: string;
+  onCancel?: () => void;
 }
 
-export default function ProcessingPanel({ progress, currentLabel, completed, total }: Props) {
-  const steps = [
-    { label: "Fetching PDFs from NSE/BSE archives", done: progress > 15 },
-    { label: "Extracting text content via pdfplumber", done: progress > 35 },
-    { label: "AI extraction via Mistral-7B on OpenRouter", done: progress > 55 },
-    { label: "Running 5-dimension impact scoring", done: progress > 75 },
-    { label: "Ranking & generating analyst notes", done: progress > 95 },
-  ];
+const STEPS = [
+  "Fetching PDFs from NSE/BSE archives",
+  "Extracting text via pdfplumber",
+  "Running AI extraction + scoring",
+  "Computing 5-dimension impact scores",
+  "Ranking & finalising analyst notes",
+];
 
+export default function ProcessingPanel({ progress, currentLabel, completed, total, onCancel }: Props) {
   return (
-    <div className="max-w-2xl mx-auto">
-      {/* Terminal header */}
-      <div className="bg-[#0F1623] border border-[#1A2332] rounded-xl overflow-hidden scan-container">
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-[#1A2332] bg-[#0A0E17]">
-          <div className="w-3 h-3 rounded-full bg-[#FF4444]" />
-          <div className="w-3 h-3 rounded-full bg-[#FFB800]" />
-          <div className="w-3 h-3 rounded-full bg-[#00FF88]" />
-          <span className="ml-2 text-[11px] font-mono text-[#5A7A9A]">impact-scorer — analysis in progress</span>
+    <div className="max-w-xl mx-auto space-y-4">
+      {/* Terminal window */}
+      <div className="card scan-wrap overflow-hidden">
+        {/* Title bar */}
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ borderColor: "var(--border)", background: "var(--bg-raised)" }}>
+          <span className="w-2.5 h-2.5 rounded-full bg-red-500/70" />
+          <span className="w-2.5 h-2.5 rounded-full bg-yellow-500/70" />
+          <span className="w-2.5 h-2.5 rounded-full bg-green-500/70" />
+          <span className="ml-2 text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
+            impact-scorer · analysis running
+          </span>
+          <span className="ml-auto text-[10px] font-mono" style={{ color: "var(--positive)" }}>
+            {completed}/{total} done
+          </span>
         </div>
 
-        <div className="p-6 font-mono text-xs space-y-2">
-          <div className="text-[#00D4FF]">$ ./analyze_documents.py --model mistral-7b --pdfs 5</div>
-          <div className="text-[#5A7A9A]">Initializing corporate action analysis pipeline...</div>
-          <div className="text-[#5A7A9A]">Loading PDF fetcher with session spoofing...</div>
-          <div className="text-[#5A7A9A] mt-2">
-            Documents processed: <span className="text-[#00FF88]">{completed}</span>
-            <span className="text-[#3A4A5C]"> / </span>
-            <span className="text-[#C8D8E8]">{total}</span>
-          </div>
+        {/* Terminal body */}
+        <div className="p-5 space-y-2 font-mono text-[11px]">
+          <div style={{ color: "var(--accent)" }}>$ python analyze.py --pdfs {total} --model gemma-4-31b</div>
+          <div style={{ color: "var(--text-muted)" }}>Initialising pipeline...</div>
 
           {currentLabel && (
-            <div className="text-[#FFB800] flex items-center gap-1">
-              <span className="animate-pulse2">⟳</span>
-              <span>Processing: {currentLabel}</span>
-              <span className="cursor" />
+            <div className="mt-1 blink-cursor" style={{ color: "var(--amber)" }}>
+              ⟳ {currentLabel}
             </div>
           )}
 
-          <div className="mt-4 space-y-2">
-            {steps.map((step, i) => (
-              <div key={i} className="flex items-center gap-3">
-                <span className={step.done ? "text-[#00FF88]" : progress > (i * 18) ? "text-[#FFB800]" : "text-[#3A4A5C]"}>
-                  {step.done ? "✓" : progress > (i * 18) ? "◉" : "○"}
-                </span>
-                <span className={step.done ? "text-[#5A7A9A]" : progress > (i * 18) ? "text-[#C8D8E8]" : "text-[#3A4A5C]"}>
-                  {step.label}
-                </span>
-              </div>
-            ))}
+          <div className="mt-3 space-y-1.5">
+            {STEPS.map((step, i) => {
+              const threshold = (i / STEPS.length) * 100;
+              const isDone = progress > threshold + 18;
+              const isActive = !isDone && progress > threshold;
+              return (
+                <div key={i} className="flex items-center gap-2.5">
+                  <span className="w-3 text-center" style={{
+                    color: isDone ? "var(--positive)" : isActive ? "var(--amber)" : "var(--text-muted)"
+                  }}>
+                    {isDone ? "✓" : isActive ? "·" : "○"}
+                  </span>
+                  <span style={{
+                    color: isDone ? "var(--text-muted)" : isActive ? "var(--text-primary)" : "var(--text-muted)",
+                    opacity: isDone ? 0.6 : 1
+                  }}>
+                    {step}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
 
       {/* Progress bar */}
-      <div className="mt-6">
-        <div className="flex justify-between text-[11px] font-mono text-[#5A7A9A] mb-2">
+      <div>
+        <div className="flex justify-between text-[10px] font-mono mb-1.5" style={{ color: "var(--text-muted)" }}>
           <span>OVERALL PROGRESS</span>
-          <span className="text-[#00D4FF]">{progress}%</span>
+          <span style={{ color: "var(--accent)" }}>{progress}%</span>
         </div>
-        <div className="h-2 bg-[#1A2332] rounded-full overflow-hidden">
+        <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-raised)" }}>
           <div
-            className="h-full rounded-full transition-all duration-500"
+            className="h-full rounded-full bar-fill"
             style={{
               width: `${progress}%`,
-              background: "linear-gradient(90deg, #00D4FF, #00FF88)",
-              boxShadow: "0 0 8px rgba(0, 212, 255, 0.5)",
+              background: "linear-gradient(90deg, #38BDF8, #10B981)",
+              boxShadow: "0 0 8px rgba(56,189,248,0.4)",
             }}
           />
         </div>
       </div>
 
-      {/* ETA */}
-      <p className="text-center text-[11px] text-[#3A4A5C] font-mono mt-4">
-        This takes 30–90s per document due to AI processing and PDF fetching
-      </p>
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
+          ~30–90s per document · AI processing + PDF fetch
+        </p>
+        {onCancel && (
+          <button onClick={onCancel} className="btn-ghost text-[10px]" style={{ color: "var(--red)", borderColor: "rgba(239,68,68,0.2)" }}>
+            ✕ Cancel
+          </button>
+        )}
+      </div>
     </div>
   );
 }
