@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { AnalysisResult, DIMENSION_LABELS, DIMENSION_ICONS, Scores, getDimReason, getRatingColor } from "../lib/api";
+import { AnalysisResult, DIMENSION_LABELS, DIMENSION_ICONS, getDimReason, getRatingColor } from "../lib/api";
 import { RadarChart, Radar, PolarGrid, PolarAngleAxis, ResponsiveContainer, Tooltip } from "recharts";
 
 type DimKey = "financial_magnitude"|"sector_sensitivity"|"revenue_contribution"|"announcement_credibility"|"market_impact_potential";
@@ -35,8 +35,14 @@ export default function ScoreCard({ result, animationDelay = 0 }: Props) {
           {/* Left: company info */}
           <div className="flex-1 min-w-0">
             {rank && (
-              <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[10px] font-bold mb-2 ${rank <= 3 ? `medal-${rank}` : ""}`}
-                style={rank > 3 ? { background: "var(--bg-raised)", color: "var(--text-muted)", border: "1px solid var(--border)" } : {}}>
+              <span
+                className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[10px] font-bold mb-2 ${rank <= 3 ? `medal-${rank}` : ""}`}
+                style={rank > 3 ? {
+                  background: "var(--bg-hover)",
+                  color: "var(--text-secondary)",
+                  border: "1px solid var(--border-mid)",
+                } : {}}
+              >
                 {rank}
               </span>
             )}
@@ -61,12 +67,12 @@ export default function ScoreCard({ result, animationDelay = 0 }: Props) {
                 </span>
               )}
               {extracted?.sector && (
-                <span className="text-[10px] px-2 py-0.5 rounded" style={{ background: "var(--bg-raised)", color: "var(--text-muted)" }}>
+                <span className="text-[10px] px-2 py-0.5 rounded" style={{ background: "var(--bg-raised)", color: "var(--text-secondary)" }}>
                   {extracted.sector}
                 </span>
               )}
               {extracted?.time_horizon && extracted.time_horizon !== "Unknown" && (
-                <span className="text-[10px] px-2 py-0.5 rounded" style={{ background: "var(--bg-raised)", color: "var(--text-muted)" }}>
+                <span className="text-[10px] px-2 py-0.5 rounded" style={{ background: "var(--bg-raised)", color: "var(--text-secondary)" }}>
                   {extracted.time_horizon}
                 </span>
               )}
@@ -112,7 +118,7 @@ export default function ScoreCard({ result, animationDelay = 0 }: Props) {
             return (
               <div key={dim}>
                 <div className="flex justify-between items-center mb-1">
-                  <span className="text-[10px] font-mono flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
+                  <span className="text-[10px] font-mono flex items-center gap-1.5" style={{ color: "var(--text-secondary)" }}>
                     <span>{DIMENSION_ICONS[dim]}</span>
                     {DIMENSION_LABELS[dim]}
                   </span>
@@ -146,7 +152,7 @@ export default function ScoreCard({ result, animationDelay = 0 }: Props) {
             <ResponsiveContainer width="100%" height={150}>
               <RadarChart data={radarData} margin={{ top: 5, right: 15, bottom: 5, left: 15 }}>
                 <PolarGrid stroke="var(--border)" />
-                <PolarAngleAxis dataKey="subject" tick={{ fill: "var(--text-muted)", fontSize: 9, fontFamily: "JetBrains Mono" }} />
+                <PolarAngleAxis dataKey="subject" tick={{ fill: "var(--text-secondary)", fontSize: 9, fontFamily: "JetBrains Mono" }} />
                 <Radar dataKey="score" stroke={color} fill={color} fillOpacity={0.12} strokeWidth={1.5} />
                 <Tooltip contentStyle={{ background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11 }} itemStyle={{ color }} />
               </RadarChart>

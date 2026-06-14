@@ -10,13 +10,24 @@ load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Current verified free models on OpenRouter as of June 2026
-# Ordered: best quality first, fallback to smaller/faster
+# (model_id, max_attempts, delay_between_retries_seconds)
+# Gemma is the most reliable free model on this key — give it 2 quick tries.
+# The rest are single-shot fallbacks spread across separate quota pools.
 MODELS = [
-    "google/gemma-4-31b-it:free",   # Best free model (Quality 65), 262K ctx
+    ("google/gemma-4-31b-it:free", 2, 5),
+    ("meta-llama/llama-3.3-70b-instruct:free", 1, 0),
+    ("qwen/qwen3-next-80b-a3b-instruct:free", 1, 0),
+    ("meta-llama/llama-3.2-3b-instruct:free", 1, 0),
+    ("nvidia/nemotron-nano-9b-v2:free", 1, 0),
 ]
 
-INTER_DOC_DELAY = 12  # seconds between documents (stay under 20 req/min)
+# If EVERY model in MODELS fails (full pass), cool down and walk the whole
+# chain again. This catches per-minute rate-limit windows that a single
+# 5s per-model retry is too short to clear.
+FULL_PASS_RETRIES = 2
+FULL_PASS_COOLDOWN = 20  # seconds between full passes
+
+INTER_DOC_DELAY = 6  # seconds between documents (stay under free-tier rate limits)
 
 COMBINED_PROMPT = """You are a financial analyst scoring Indian stock exchange filings.
 Analyze this corporate announcement and return ONE JSON object only. No markdown. No explanation. No thinking tags.
@@ -34,7 +45,7 @@ Return exactly this JSON structure:
   "sector": "industry sector",
   "counterparty": "client or authority name or null",
   "time_horizon": "Short-term (0-6 months) or Medium-term (6-18 months) or Long-term (18+ months) or Unknown",
-  "summary": "2-3 sentence plain English summary of what was announced",
+  "summary": "ONE concise sentence (max 18 words) summarizing what was announced - must be a complete sentence that fits on two short lines",
   "key_facts": ["fact1", "fact2", "fact3"],
   "scores": {{
     "financial_magnitude": {{"score": 12, "reason": "one sentence"}},
@@ -54,6 +65,23 @@ announcement_credibility: 0-5=vague, 6-10=basic filing, 11-15=named counterparty
 market_impact_potential: 0-5=no reaction, 6-10=mild, 11-15=analyst attention, 16-20=strong catalyst"""
 
 
+class JobCancelled(Exception):
+    """Raised when the user cancels a job mid-flight."""
+    pass
+
+
+def _check_cancelled(cancelled_flag: list = None):
+    if cancelled_flag and cancelled_flag[0]:
+        raise JobCancelled("Job cancelled by user")
+
+
+def _cancellable_sleep(seconds: int, cancelled_flag: list = None):
+    """Sleep in 1s increments, raising JobCancelled promptly if cancelled."""
+    for _ in range(seconds):
+        _check_cancelled(cancelled_flag)
+        time.sleep(1)
+
+
 def _strip_thinking(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL)
@@ -61,11 +89,70 @@ def _strip_thinking(text: str) -> str:
     return text.strip()
 
 
-def _call_openrouter(prompt: str, max_tokens: int = 1200, cancelled_flag: list = None) -> str:
+def _parse_json_response(raw: str) -> dict:
+    cleaned = _strip_thinking(raw)
+    cleaned = re.sub(r"```(?:json)?\n?", "", cleaned).strip().rstrip("`").strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError(f"No JSON object found. Preview: {raw[:200]}")
+    return json.loads(cleaned[start:end + 1])
+
+
+def _single_attempt(model: str, prompt: str, max_tokens: int, headers: dict, cancelled_flag: list) -> dict:
     """
-    Try each model once. On 429 → skip immediately (preserve quota).
-    On 404 → skip (model unavailable). On 5xx → one retry.
-    cancelled_flag: a mutable list [False] — set to [True] to abort mid-flight.
+    One HTTP call + JSON parse. Raises on ANY failure — HTTP error,
+    timeout, empty response, OR malformed JSON — so the caller can
+    retry/fallback uniformly regardless of *why* it failed.
+    Returns the parsed dict on success.
+    """
+    _check_cancelled(cancelled_flag)
+
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": 0.1,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    with httpx.Client(timeout=60) as client:
+        response = client.post(OPENROUTER_URL, json=payload, headers=headers)
+
+    if response.status_code == 429:
+        raise RuntimeError(f"429 rate limited on {model}")
+    if response.status_code in (400, 404):
+        raise RuntimeError(f"{response.status_code} model unavailable: {model}")
+    if response.status_code >= 500:
+        raise RuntimeError(f"{response.status_code} server error on {model}")
+
+    response.raise_for_status()
+    data = response.json()
+
+    if not data.get("choices"):
+        raise RuntimeError(f"Empty choices from {model}")
+
+    content = data["choices"][0]["message"]["content"]
+    if not content or not content.strip():
+        raise RuntimeError(f"Empty content from {model}")
+
+    # A malformed-JSON response is treated as a failure just like a
+    # network/HTTP failure — it triggers a retry or fallback below.
+    parsed = _parse_json_response(content)
+    print(f"[OpenRouter] SUCCESS via: {data.get('model', model)}")
+    return parsed
+
+
+def _run_with_fallback(prompt: str, max_tokens: int, cancelled_flag: list = None) -> dict:
+    """
+    Walk MODELS in order. For each (model, max_attempts, retry_delay):
+    retry that model up to max_attempts times, then move to the next
+    model. Any failure type — 429, 5xx, timeout, empty response, bad
+    JSON — counts the same and triggers a retry/fallback.
+
+    If EVERY model in the list fails (a full pass), cool down for
+    FULL_PASS_COOLDOWN seconds and walk the whole chain again, up to
+    FULL_PASS_RETRIES times. This catches per-minute rate-limit
+    windows that a short per-model retry can't clear.
     """
     if not OPENROUTER_API_KEY:
         raise ValueError("OPENROUTER_API_KEY not set in .env file")
@@ -79,81 +166,39 @@ def _call_openrouter(prompt: str, max_tokens: int = 1200, cancelled_flag: list =
 
     last_error = None
 
-    for model in MODELS:
-        # Check cancellation before each model attempt
-        if cancelled_flag and cancelled_flag[0]:
-            raise Exception("Job cancelled by user")
+    for full_pass in range(1, FULL_PASS_RETRIES + 1):
+        for model, max_attempts, retry_delay in MODELS:
+            for attempt in range(1, max_attempts + 1):
+                _check_cancelled(cancelled_flag)
+                print(f"[OpenRouter] pass {full_pass}/{FULL_PASS_RETRIES} — {model} attempt {attempt}/{max_attempts}")
 
-        print(f"[OpenRouter] Trying: {model}")
-        payload = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "temperature": 0.1,
-            "messages": [{"role": "user", "content": prompt}],
-        }
+                try:
+                    return _single_attempt(model, prompt, max_tokens, headers, cancelled_flag)
+                except JobCancelled:
+                    raise
+                except Exception as e:
+                    last_error = f"{model} attempt {attempt}/{max_attempts}: {e}"
+                    print(f"[OpenRouter] FAILED — {last_error}")
 
-        try:
-            with httpx.Client(timeout=60) as client:
-                response = client.post(OPENROUTER_URL, json=payload, headers=headers)
-
-            if response.status_code == 429:
-                print(f"[OpenRouter] 429 on {model} — skipping (quota preserved)")
-                last_error = f"429 rate limit on {model}"
-                time.sleep(2)
-                continue
-
-            if response.status_code in (400, 404):
-                print(f"[OpenRouter] {response.status_code} on {model} — unavailable, skipping")
-                last_error = f"{response.status_code} on {model}"
-                continue
-
-            if response.status_code >= 500:
-                print(f"[OpenRouter] {response.status_code} on {model} — retrying once...")
-                time.sleep(8)
-                with httpx.Client(timeout=60) as client:
-                    response = client.post(OPENROUTER_URL, json=payload, headers=headers)
-                if not response.ok:
-                    last_error = f"5xx on {model}"
+                    is_last_attempt = attempt == max_attempts
+                    if not is_last_attempt:
+                        wait = retry_delay if retry_delay > 0 else 1
+                        print(f"[OpenRouter] Retrying {model} in {wait}s...")
+                        _cancellable_sleep(wait, cancelled_flag)
                     continue
 
-            response.raise_for_status()
-            data = response.json()
-
-            if not data.get("choices"):
-                last_error = "Empty choices"
-                continue
-
-            content = data["choices"][0]["message"]["content"]
-            if not content or not content.strip():
-                last_error = "Empty content"
-                continue
-
-            print(f"[OpenRouter] SUCCESS via: {data.get('model', model)}")
-            return content
-
-        except httpx.TimeoutException:
-            print(f"[OpenRouter] Timeout on {model} — skipping")
-            last_error = f"Timeout on {model}"
-            continue
-        except httpx.RequestError as e:
-            print(f"[OpenRouter] Network error on {model}: {e}")
-            last_error = str(e)
-            continue
+        # Entire model chain failed this pass.
+        is_last_pass = full_pass == FULL_PASS_RETRIES
+        if not is_last_pass:
+            print(f"[OpenRouter] All models failed on pass {full_pass}/{FULL_PASS_RETRIES}. "
+                  f"Cooling down {FULL_PASS_COOLDOWN}s before retrying full chain...")
+            _cancellable_sleep(FULL_PASS_COOLDOWN, cancelled_flag)
 
     raise Exception(
-        f"All {len(MODELS)} models failed. Last error: {last_error}\n"
-        "Check openrouter.ai/models for current free model availability."
+        f"All models exhausted after {FULL_PASS_RETRIES} passes. Last error: {last_error}\n"
+        "Check openrouter.ai/models for current free model availability, "
+        "or this key's daily quota may be exhausted."
     )
-
-
-def _parse_json_response(raw: str) -> dict:
-    cleaned = _strip_thinking(raw)
-    cleaned = re.sub(r"```(?:json)?\n?", "", cleaned).strip().rstrip("`").strip()
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError(f"No JSON object found. Preview: {raw[:200]}")
-    return json.loads(cleaned[start:end + 1])
 
 
 def _compute_rating(total: int):
@@ -199,13 +244,14 @@ def _error_result(label: str, error: str) -> dict:
 
 
 def analyze_document(text: str, label: str = "Unknown", cancelled_flag: list = None) -> dict:
-    """Single LLM call: extract info + score in one shot."""
+    """Extract info + score in one shot, with multi-model retry/fallback."""
     truncated = text[:3000] if len(text) > 3000 else text
     prompt = COMBINED_PROMPT.format(text=truncated)
 
     try:
-        raw = _call_openrouter(prompt, max_tokens=1200, cancelled_flag=cancelled_flag)
-        result = _parse_json_response(raw)
+        result = _run_with_fallback(prompt, max_tokens=1200, cancelled_flag=cancelled_flag)
+    except JobCancelled:
+        raise
     except Exception as e:
         print(f"[Analyzer] FAILED for '{label}': {e}")
         return _error_result(label, str(e))

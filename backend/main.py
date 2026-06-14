@@ -2,15 +2,12 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
-import asyncio
 import uuid
-import json
-import os
 import time
 from datetime import datetime
 
 from pdf_fetcher import fetch_and_extract, extract_text_from_file
-from scorer import analyze_document, INTER_DOC_DELAY
+from scorer import analyze_document, INTER_DOC_DELAY, JobCancelled
 
 app = FastAPI(title="Corporate Impact Scorer API", version="1.0.0")
 
@@ -23,7 +20,6 @@ app.add_middleware(
 )
 
 # In-memory job store (for demo purposes)
-# In production, replace with Redis or a DB
 JOBS: dict = {}
 
 DEFAULT_PDFS = [
@@ -61,16 +57,19 @@ class AnalyzeRequest(BaseModel):
 
 class JobStatus(BaseModel):
     job_id: str
-    status: str  # pending | processing | completed | failed
-    progress: int  # 0-100
+    status: str  # pending | processing | completed | cancelled | failed
+    progress: int
     results: Optional[List[dict]] = None
     error: Optional[str] = None
     created_at: str
     completed_at: Optional[str] = None
 
 
-def _process_single_pdf(pdf_meta: dict) -> dict:
-    """Fetch, extract, and score a single PDF."""
+def _process_single_pdf(pdf_meta: dict, cancelled_flag: list) -> dict:
+    """Fetch, extract, and score a single PDF. Raises JobCancelled if cancelled."""
+    if cancelled_flag and cancelled_flag[0]:
+        raise JobCancelled("Job cancelled by user")
+
     result = {
         "id": pdf_meta["id"],
         "url": pdf_meta["url"],
@@ -88,7 +87,6 @@ def _process_single_pdf(pdf_meta: dict) -> dict:
     if not fetch_result["success"] or not fetch_result["text"].strip():
         result["status"] = "fetch_failed"
         result["fetch_error"] = fetch_result.get("error", "Empty document")
-        # Still try to score with empty data so UI shows partial result
         result["extracted"] = {
             "company_name": pdf_meta["label"].split("—")[0].strip(),
             "ticker": None,
@@ -109,8 +107,9 @@ def _process_single_pdf(pdf_meta: dict) -> dict:
         }
         return result
 
-    # Step 2: AI Analysis
-    analysis = analyze_document(fetch_result["text"])
+    # Step 2: AI Analysis (may raise JobCancelled — propagates up)
+    company_from_label = pdf_meta["label"].split("—")[0].strip()
+    analysis = analyze_document(fetch_result["text"], label=company_from_label, cancelled_flag=cancelled_flag)
     result["extracted"] = analysis["extracted"]
     result["scores"] = analysis["scores"]
     result["status"] = "completed"
@@ -119,16 +118,39 @@ def _process_single_pdf(pdf_meta: dict) -> dict:
     return result
 
 
+def _interruptible_sleep(seconds: int, cancelled_flag: list):
+    """Sleep in 1s increments so cancellation is responsive during the inter-doc delay."""
+    for _ in range(seconds):
+        if cancelled_flag[0]:
+            return
+        time.sleep(1)
+
+
 def _run_analysis_job(job_id: str, pdfs: List[dict]):
     """Background job: process all PDFs sequentially and update job store."""
-    JOBS[job_id]["status"] = "processing"
+    job = JOBS[job_id]
+    job["status"] = "processing"
+    cancelled_flag = job["cancelled_flag"]
     results = []
     total = len(pdfs)
 
     for i, pdf_meta in enumerate(pdfs):
+        if cancelled_flag[0]:
+            print(f"[Job {job_id}] Cancelled before doc {i + 1}/{total}")
+            job["status"] = "cancelled"
+            job["results"] = results
+            job["completed_at"] = datetime.utcnow().isoformat()
+            return
+
         try:
-            result = _process_single_pdf(pdf_meta)
+            result = _process_single_pdf(pdf_meta, cancelled_flag)
             results.append(result)
+        except JobCancelled:
+            print(f"[Job {job_id}] Cancelled during doc {i + 1}/{total}")
+            job["status"] = "cancelled"
+            job["results"] = results
+            job["completed_at"] = datetime.utcnow().isoformat()
+            return
         except Exception as e:
             results.append({
                 "id": pdf_meta["id"],
@@ -141,13 +163,19 @@ def _run_analysis_job(job_id: str, pdfs: List[dict]):
             })
 
         progress = int(((i + 1) / total) * 100)
-        JOBS[job_id]["progress"] = progress
-        JOBS[job_id]["partial_results"] = results
+        job["progress"] = progress
+        job["partial_results"] = results
 
-        # Respect free tier: 20 req/min limit. Wait between documents.
+        # Respect free tier rate limits — but stay responsive to cancellation
         if i < total - 1:
-            print(f"[Job] Waiting {INTER_DOC_DELAY}s before next document (rate limit buffer)...")
-            time.sleep(INTER_DOC_DELAY)
+            print(f"[Job {job_id}] Waiting {INTER_DOC_DELAY}s before next document...")
+            _interruptible_sleep(INTER_DOC_DELAY, cancelled_flag)
+            if cancelled_flag[0]:
+                print(f"[Job {job_id}] Cancelled during inter-doc delay")
+                job["status"] = "cancelled"
+                job["results"] = results
+                job["completed_at"] = datetime.utcnow().isoformat()
+                return
 
     # Rank results by total score
     scored = [r for r in results if r.get("scores") and r["scores"].get("total_score", 0) > 0]
@@ -155,10 +183,10 @@ def _run_analysis_job(job_id: str, pdfs: List[dict]):
     for rank, item in enumerate(scored, 1):
         item["rank"] = rank
 
-    JOBS[job_id]["status"] = "completed"
-    JOBS[job_id]["results"] = results
-    JOBS[job_id]["completed_at"] = datetime.utcnow().isoformat()
-    JOBS[job_id]["progress"] = 100
+    job["status"] = "completed"
+    job["results"] = results
+    job["completed_at"] = datetime.utcnow().isoformat()
+    job["progress"] = 100
 
 
 @app.get("/")
@@ -184,6 +212,7 @@ def start_analysis(request: AnalyzeRequest, background_tasks: BackgroundTasks):
         "results": None,
         "partial_results": [],
         "error": None,
+        "cancelled_flag": [False],  # mutable — set [0] = True to request cancellation
         "created_at": datetime.utcnow().isoformat(),
         "completed_at": None,
     }
@@ -210,6 +239,22 @@ def get_job_status(job_id: str):
     }
 
 
+@app.post("/api/job/{job_id}/cancel")
+def cancel_job(job_id: str):
+    """Request cancellation of a running job. Stops after the current API call/document."""
+    if job_id not in JOBS:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = JOBS[job_id]
+    if job["status"] in ("completed", "cancelled", "failed"):
+        return {"message": f"Job already {job['status']}", "status": job["status"]}
+
+    job["cancelled_flag"][0] = True
+    job["status"] = "cancelling"
+    print(f"[Job {job_id}] Cancellation requested")
+    return {"message": "Cancellation requested", "status": "cancelling"}
+
+
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...), label: str = "Uploaded PDF"):
     """Analyze a manually uploaded PDF file."""
@@ -225,7 +270,8 @@ async def upload_pdf(file: UploadFile = File(...), label: str = "Uploaded PDF"):
     if not text.strip():
         raise HTTPException(status_code=422, detail="PDF appears to be empty or image-only")
 
-    analysis = analyze_document(text)
+    company_label = (label or file.filename).replace(".pdf", "").strip()
+    analysis = analyze_document(text, label=company_label)
     return {
         "id": str(uuid.uuid4()),
         "label": label or file.filename,
@@ -241,5 +287,6 @@ async def upload_pdf(file: UploadFile = File(...), label: str = "Uploaded PDF"):
 @app.delete("/api/job/{job_id}")
 def delete_job(job_id: str):
     if job_id in JOBS:
+        JOBS[job_id]["cancelled_flag"][0] = True
         del JOBS[job_id]
     return {"deleted": True}
