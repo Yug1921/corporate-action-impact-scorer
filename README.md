@@ -10,20 +10,16 @@ AI-powered analysis of NSE/BSE corporate filings — extracts, scores, and ranks
 ## 📸 Output
 
 ### Score Cards — Ranked Dashboard
-![Score Cards](<img width="1918" height="922" alt="image" src="https://github.com/user-attachments/assets/ac5b19ea-8b43-4258-bdfc-615bee256a0d" />
-)
+<img width="1918" height="922" alt="image" src="https://github.com/user-attachments/assets/ac5b19ea-8b43-4258-bdfc-615bee256a0d" />
 
 ### Upload Mode — Analyze a Custom PDF
-![Upload PDF](<img width="1918" height="928" alt="image" src="https://github.com/user-attachments/assets/425ff283-84bc-4d9f-8da4-08ea58300e2f" />
-)
+<img width="1918" height="928" alt="image" src="https://github.com/user-attachments/assets/425ff283-84bc-4d9f-8da4-08ea58300e2f" />
 
 ### Live Processing
-![Processing](<img width="1918" height="925" alt="image" src="https://github.com/user-attachments/assets/5a5b0809-2a33-47c4-84a3-b28af5d40ea8" />
-)
+<img width="1918" height="925" alt="image" src="https://github.com/user-attachments/assets/5a5b0809-2a33-47c4-84a3-b28af5d40ea8" />
 
 ### Rankings — Leaderboard View
-![Rankings](<img width="1918" height="925" alt="image" src="https://github.com/user-attachments/assets/922d50bc-ce55-4938-a496-5977bc53ad60" />
-)
+<img width="1918" height="925" alt="image" src="https://github.com/user-attachments/assets/922d50bc-ce55-4938-a496-5977bc53ad60" />
 <img width="1918" height="930" alt="image" src="https://github.com/user-attachments/assets/abf47324-7302-497b-a17f-0809ce31284b" />
 
 
