@@ -3,7 +3,7 @@
 AI-powered analysis of NSE/BSE corporate filings — extracts, scores, and ranks announcements by market impact potential.
 
 **🔗 Live App:** [corporate-action-impact-scorer.vercel.app](https://corporate-action-impact-scorer.vercel.app/)
-**📁 Repository:** [github.com/Yug1921/corporate-action-impact-scorer](https://github.com/Yug1921/corporate-action-impact-scorer)
+
 
 ---
 
