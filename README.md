@@ -196,7 +196,7 @@ As a result:
 
 ---
 
-## 📋 Approach Summary (for submission)
+## 📋 Approach Summary 
 
 - **PDF Ingestion:** `requests` with rotating headers/session cookies to bypass NSE/BSE bot detection; `pdfplumber` for text extraction; supports both pre-configured filing URLs and direct user uploads
 - **AI Extraction + Scoring:** A single OpenRouter LLM call per document returns structured fields (company, ticker, type, financial value, sector, counterparty, time horizon) *and* all 5 dimension scores with reasoning, in one JSON response
